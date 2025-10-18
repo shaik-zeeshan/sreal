@@ -1,3 +1,4 @@
+import { getAllWindows } from "@tauri-apps/api/window";
 import {
   AudioLines,
   AudioWaveform,
@@ -6,6 +7,7 @@ import {
   CaptionsOff,
   Gauge,
   Pause,
+  PictureInPicture,
   Play,
   Volume1,
   Volume2,
@@ -14,6 +16,7 @@ import {
 import { createMemo, For, Show } from "solid-js";
 import type { Chapter, Track } from "~/components/video/types";
 import { formatTime } from "~/components/video/utils";
+import { commands } from "~/lib/tauri";
 import { cn } from "~/lib/utils";
 
 type VideoControlsProps = {
@@ -46,6 +49,7 @@ type VideoControlsProps = {
   onProgressClick: (value: number) => void;
   onSetSpeed: (speed: number) => void;
   onNavigateToChapter: (chapter: Chapter) => void;
+  onOpenPip: () => Promise<void>;
   audioBtnRef?: HTMLButtonElement;
   subsBtnRef?: HTMLButtonElement;
   speedBtnRef?: HTMLButtonElement;
@@ -376,6 +380,26 @@ export default function VideoControls(props: VideoControlsProps) {
               <BookOpen class="h-5 w-5" />
             </button>
           </Show>
+
+          <button
+            aria-label="Picture in Picture"
+            class="rounded-full p-2 text-white transition-all hover:bg-white/20"
+            onClick={async (e) => {
+              e.stopPropagation();
+              const windows = await getAllWindows();
+              const pipWindow = windows.find(
+                (window) => window.label === "pip"
+              );
+              if (pipWindow) {
+                await commands.closePipWindow();
+              } else {
+                await props.onOpenPip();
+              }
+            }}
+            title="Open Picture in Picture"
+          >
+            <PictureInPicture class="h-5 w-5" />
+          </button>
         </div>
       </div>
     </div>

@@ -14,6 +14,9 @@ async playbackPause() : Promise<void> {
 async playbackSeek(time: number) : Promise<void> {
     await TAURI_INVOKE("playback_seek", { time });
 },
+async playbackAbsoluteSeek(time: number) : Promise<void> {
+    await TAURI_INVOKE("playback_absolute_seek", { time });
+},
 async playbackVolume(volume: number) : Promise<void> {
     await TAURI_INVOKE("playback_volume", { volume });
 },
@@ -37,6 +40,12 @@ async toggleTitlebarHide(hide: boolean) : Promise<null> {
 },
 async toggleFullscreen() : Promise<null> {
     return await TAURI_INVOKE("toggle_fullscreen");
+},
+async openPipWindow() : Promise<null> {
+    return await TAURI_INVOKE("open_pip_window");
+},
+async closePipWindow() : Promise<null> {
+    return await TAURI_INVOKE("close_pip_window");
 }
 }
 

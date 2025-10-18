@@ -1,41 +1,20 @@
+use objc2_app_kit::NSAccessibility;
 use specta::specta;
 use tauri::{Manager, WebviewBuilder, WindowBuilder, Wry};
-use keyring::{Entry, Result as KeyringResult};
-use rand::{distributions::Alphanumeric, Rng};
 
 use tauri_plugin_http;
 
 use crate::mpv::{run_render_thread, PlaybackEvent};
 // Credential operations are handled by the frontend JavaScript API
 
+mod credentials;
 pub mod mpv;
 mod store;
-mod credentials;
 
+#[derive(Clone)]
 struct AppState {
     render_tx: std::sync::mpsc::Sender<PlaybackEvent>,
-}
-
-fn generate_secure_password() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect()
-}
-
-fn get_or_create_vault_password() -> KeyringResult<String> {
-    let entry = Entry::new("com.sreal.vault", "master")?;
-    
-    match entry.get_password() {
-        Ok(password) => Ok(password),
-        Err(_) => {
-            // Generate new password on first run
-            let password = generate_secure_password();
-            entry.set_password(&password)?;
-            Ok(password)
-        }
-    }
+    pip_window: std::sync::Arc<std::sync::Mutex<Option<tauri::Window>>>,
 }
 
 #[specta]
@@ -61,6 +40,13 @@ fn playback_pause(app: tauri::AppHandle) {
 fn playback_seek(app: tauri::AppHandle, time: f64) {
     let app_state = app.state::<AppState>();
     let _ = app_state.render_tx.send(PlaybackEvent::Seek(time));
+}
+
+#[specta]
+#[tauri::command]
+fn playback_absolute_seek(app: tauri::AppHandle, time: f64) {
+    let app_state = app.state::<AppState>();
+    let _ = app_state.render_tx.send(PlaybackEvent::AbsoluteSeek(time));
 }
 
 #[specta]
@@ -109,22 +95,111 @@ fn playback_clear(app: tauri::AppHandle) {
     let _ = app_state.render_tx.send(PlaybackEvent::Clear);
 }
 
+#[specta]
+#[tauri::command]
+fn open_pip_window(app: tauri::AppHandle) -> Result<(), String> {
+    let app_state = app.state::<AppState>();
+
+    // Check if PiP window already exists
+    {
+        let pip_window_guard = app_state.pip_window.lock().unwrap();
+        if pip_window_guard.is_some() {
+            return Err("PiP window already exists".to_string());
+        }
+    }
+
+    // Create PiP window
+    let pip_window = tauri::WindowBuilder::new(&app, "pip")
+        .title("Picture in Picture")
+        .inner_size(400.0, 225.0) // 16:9 aspect ratio
+        .min_inner_size(200.0, 112.0)
+        .resizable(true)
+        .always_on_top(true)
+        .transparent(true)
+        .visible_on_all_workspaces(true)
+        .build()
+        .map_err(|e| format!("Failed to create PiP window: {}", e))?;
+
+    let _ = make_frameless_window(&pip_window)
+        .map_err(|e| format!("failed to make frameless window {}", e.to_string()))?;
+
+    // Create transparent webview for PiP
+    let pip_webview =
+        tauri::WebviewBuilder::new("pip", tauri::WebviewUrl::App("/pip".into())).transparent(true);
+
+    pip_window
+        .add_child(
+            pip_webview,
+            tauri::LogicalPosition::new(0, 0),
+            pip_window.inner_size().unwrap(),
+        )
+        .map_err(|e| format!("Failed to add webview to PiP window: {}", e))?;
+
+    // Store PiP window in state
+    {
+        let mut pip_window_guard = app_state.pip_window.lock().unwrap();
+        *pip_window_guard = Some(pip_window);
+    }
+
+    // Send event to add PiP window context
+    if let Err(e) = app_state.render_tx.send(PlaybackEvent::AddPipWindow) {
+        log::error!("Failed to send AddPipWindow event: {}", e);
+    }
+
+    Ok(())
+}
+
+#[specta]
+#[tauri::command]
+fn close_pip_window(app: tauri::AppHandle) -> Result<(), String> {
+    let app_state = app.state::<AppState>();
+
+    log::info!("Closing PiP window");
+
+    // Get and close PiP window
+    let pip_window = {
+        let mut pip_window_guard = app_state.pip_window.lock().unwrap();
+        pip_window_guard.take()
+    };
+
+    if let Some(pip_window) = pip_window {
+        pip_window
+            .destroy()
+            .map_err(|e| format!("Failed to close PiP window: {}", e))?;
+    } else {
+        return Err("No PiP window to close".to_string());
+    }
+
+    // Send event to remove PiP window context
+    if let Err(e) = app_state.render_tx.send(PlaybackEvent::RemovePipWindow) {
+        log::error!("Failed to send RemovePipWindow event: {}", e);
+    }
+
+    Ok(())
+}
 
 #[specta]
 #[tauri::command]
 fn toggle_fullscreen(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_window("main")
+    let window = app
+        .get_window("main")
         .ok_or_else(|| "Main window not found".to_string())?;
-    
-    let is_fullscreen = window.is_fullscreen()
+
+    let is_fullscreen = window
+        .is_fullscreen()
         .map_err(|e| format!("Failed to get fullscreen state: {}", e))?;
-    
-    log::info!("Current fullscreen state: {}, toggling to: {}", is_fullscreen, !is_fullscreen);
-    
+
+    log::info!(
+        "Current fullscreen state: {}, toggling to: {}",
+        is_fullscreen,
+        !is_fullscreen
+    );
+
     // Use native Tauri fullscreen method without custom style mask manipulation
-    window.set_fullscreen(!is_fullscreen)
+    window
+        .set_fullscreen(!is_fullscreen)
         .map_err(|e| format!("Failed to set fullscreen state: {}", e))?;
-    
+
     Ok(())
 }
 
@@ -136,50 +211,91 @@ fn toggle_titlebar(window: &tauri::Window, hide: bool) -> Result<(), String> {
             return Ok(());
         }
     }
-    
-    let ns_window = window.ns_window()
-        .map_err(|e| format!("Failed to get NS window handle: {}", e))? as *mut cidre::ns::Window;
-    
+
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("Failed to get NS window handle: {}", e))?;
+
     unsafe {
-        use cidre::ns::{WindowStyleMask, WindowTitleVisibility};
-        let window = &mut *ns_window;
+        use objc2_app_kit::NSWindowButton;
 
-        // get style mask
-        let mut style_mask = window.style_mask();
+        let objc_window = ns_window as *mut objc2_app_kit::NSWindow;
+        let window = objc_window.as_ref().unwrap();
 
-        // Only modify non-fullscreen related style masks
-        style_mask.set(WindowStyleMask::FULL_SIZE_CONTENT_VIEW, true);
+        let close_button = window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .unwrap();
+        let min_button = window
+            .standardWindowButton(NSWindowButton::MiniaturizeButton)
+            .unwrap();
+        let zoom_button = window
+            .standardWindowButton(NSWindowButton::ZoomButton)
+            .unwrap();
 
-        if hide {
-            style_mask.remove(
-                WindowStyleMask::CLOSABLE
-                    | WindowStyleMask::MINIATURIZABLE
-                    | WindowStyleMask::RESIZABLE,
-            );
-        } else {
-            style_mask.set(WindowStyleMask::RESIZABLE, true);
-            style_mask.set(WindowStyleMask::CLOSABLE, true);
-            style_mask.set(WindowStyleMask::MINIATURIZABLE, true);
-        };
+        // Hide the close button
+        close_button.setHidden(hide);
 
-        window.set_style_mask(style_mask)
-            .map_err(|e| format!("Failed to set window style mask: {}", e))?;
+        // Hide the minimize button
+        min_button.setHidden(hide);
 
-        window.set_title_visibility(WindowTitleVisibility::Hidden);
-        window.set_titlebar_appears_transparent(true);
+        // Hide the zoom button
+        zoom_button.setHidden(hide);
     }
-    
+
+    Ok(())
+}
+
+fn make_frameless_window(window: &tauri::Window) -> Result<(), String> {
+    // let _ = toggle_titlebar(window, true).map_err(|e| format!("failed to hide titlebar"))?;
+
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("Failed to get NS window handle: {}", e))?;
+
+    unsafe {
+        use objc2_app_kit::{NSWindowButton, NSWindowCollectionBehavior, NSWindowTitleVisibility};
+
+        let objc_window = ns_window as *mut objc2_app_kit::NSWindow;
+        let window = objc_window.as_ref().unwrap();
+
+        let close_button = window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .unwrap();
+        let min_button = window
+            .standardWindowButton(NSWindowButton::MiniaturizeButton)
+            .unwrap();
+        let zoom_button = window
+            .standardWindowButton(NSWindowButton::ZoomButton)
+            .unwrap();
+
+        close_button.setHidden(true);
+        min_button.setHidden(true);
+        zoom_button.setHidden(true);
+
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        window.setTitlebarAppearsTransparent(true);
+
+        window.setLevel(26);
+
+        window.setMovableByWindowBackground(true);
+
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::Stationary,
+        );
+    };
+
     Ok(())
 }
 
 #[specta]
 #[tauri::command]
 fn toggle_titlebar_hide(app: tauri::AppHandle, hide: bool) -> Result<(), String> {
-    let window = app.get_window("main")
+    let window = app
+        .get_window("main")
         .ok_or_else(|| "Main window not found".to_string())?;
-    
+
     toggle_titlebar(&window, hide)?;
-    
+
     Ok(())
 }
 
@@ -194,6 +310,7 @@ pub async fn run() {
             playback_play,
             playback_pause,
             playback_seek,
+            playback_absolute_seek,
             playback_volume,
             playback_speed,
             playback_load,
@@ -201,7 +318,9 @@ pub async fn run() {
             playback_change_audio,
             playback_clear,
             toggle_titlebar_hide,
-            toggle_fullscreen
+            toggle_fullscreen,
+            open_pip_window,
+            close_pip_window
         ])
         .error_handling(tauri_specta::ErrorHandlingMode::Throw)
         .typ::<store::GeneralSettings>();
@@ -233,16 +352,15 @@ pub async fn run() {
                 .path()
                 .app_local_data_dir()
                 .expect("could not resolve app local data path");
-            
+
             // Ensure the directory exists
             std::fs::create_dir_all(&app_data_dir)
                 .map_err(|e| format!("Failed to create app data directory: {}", e))?;
-            
+
             let salt_path = app_data_dir.join("salt.txt");
 
-            app.handle().plugin(
-                tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build()
-            )?;
+            app.handle()
+                .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())?;
 
             let handle = app.handle().clone();
 
@@ -255,6 +373,7 @@ pub async fn run() {
             // webview should be transparent if window url start with /video
             let webview =
                 WebviewBuilder::new("main", tauri::WebviewUrl::App("/".into())).transparent(true);
+
             window
                 .add_child(
                     webview,
@@ -268,11 +387,20 @@ pub async fn run() {
 
             let app_state = AppState {
                 render_tx: render_tx.clone(),
+                pip_window: std::sync::Arc::new(std::sync::Mutex::new(None)),
             };
 
             // Move all MPV and OpenGL setup to a dedicated thread
             let window_clone = window.clone();
-            tokio::spawn(run_render_thread(window_clone, render_tx, render_rx));
+            let app_state_clone = app_state.clone();
+            let get_pip_window =
+                Box::new(move || app_state_clone.pip_window.lock().unwrap().clone());
+            tokio::spawn(run_render_thread(
+                window_clone,
+                render_tx,
+                render_rx,
+                get_pip_window,
+            ));
 
             app.manage(app_state);
 
@@ -292,27 +420,48 @@ pub async fn run() {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 println!("ExitRequested: {:?}", code);
             }
-            tauri::RunEvent::WindowEvent { event, .. } => {
+            tauri::RunEvent::WindowEvent { label, event, .. } => {
                 match event {
                     tauri::WindowEvent::Resized(physical_size) => {
                         let (width, height): (u32, u32) = physical_size.into();
-                        if let Err(e) = app_state
-                            .render_tx
-                            .send(PlaybackEvent::Resize(width, height)) {
-                            log::error!("Failed to send resize event to render thread: {}", e);
-                        }
 
-                        if let Some(webview) = _app.get_webview("main") {
-                            if let Err(e) = webview.set_size(physical_size) {
-                                log::error!("Failed to resize webview: {}", e);
+                        // Only send resize events for the main window to avoid affecting PiP rendering
+                        if label == "main" {
+                            if let Err(e) = app_state
+                                .render_tx
+                                .send(PlaybackEvent::Resize(width, height))
+                            {
+                                log::error!("Failed to send resize event to render thread: {}", e);
                             }
 
-                            let _ = webview.set_focus();
-                        } else {
-                            log::warn!("Main webview not found during resize");
+                            if let Some(webview) = _app.get_webview("main") {
+                                if let Err(e) = webview.set_size(physical_size) {
+                                    log::error!("Failed to resize webview: {}", e);
+                                }
+
+                                let _ = webview.set_focus();
+                            } else {
+                                log::warn!("Main webview not found during resize");
+                            }
+                        } else if label == "pip" {
+                            // Handle PiP window resize separately
+                            if let Some(webview) = _app.get_webview("pip") {
+                                if let Err(e) = webview.set_size(physical_size) {
+                                    log::error!("Failed to resize PiP webview: {}", e);
+                                }
+                            }
+
+                            // Send PiP resize event to render thread
+                            if let Err(e) = app_state
+                                .render_tx
+                                .send(PlaybackEvent::ResizePipWindow { width, height })
+                            {
+                                log::error!(
+                                    "Failed to send PiP resize event to render thread: {}",
+                                    e
+                                );
+                            }
                         }
-
-
                     }
                     _ => {}
                 };

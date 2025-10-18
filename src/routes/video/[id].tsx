@@ -47,8 +47,9 @@ export default function Page(_props: RouteSectionProps) {
     },
     enabled: !!routeParams.id && !!userStore?.user?.Id,
     refetchOnWindowFocus: false,
-    staleTime: 1000 * 60 * 5, // 5 minutes
-    retry: 3,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
+    staleTime: Number.POSITIVE_INFINITY, // 5 minutes
   }));
 
   const parentDetails = createJellyFinQuery(() => ({
@@ -93,6 +94,7 @@ export default function Page(_props: RouteSectionProps) {
     handleVolumeChange,
     setSpeed,
     handleProgressClick,
+    handleOpenPip,
     loadNewVideo,
     handleControlMouseEnter,
     handleControlMouseLeave,
@@ -100,6 +102,7 @@ export default function Page(_props: RouteSectionProps) {
     showOSD,
     hideOSD,
     toggleHelp,
+    onEndOfFile,
   } = useVideoPlayback(
     () => routeParams.id,
     () => itemDetails.data
@@ -114,6 +117,7 @@ export default function Page(_props: RouteSectionProps) {
       currentTime: () => state.currentTime,
       duration: () => state.duration,
     },
+    onEndOfFile,
   });
 
   let audioBtnRef!: HTMLButtonElement;
@@ -341,6 +345,7 @@ export default function Page(_props: RouteSectionProps) {
             <VideoControls
               audioBtnRef={audioBtnRef}
               onNavigateToChapter={navigateToChapter}
+              onOpenPip={handleOpenPip}
               onProgressClick={handleProgressClick}
               onSetSpeed={setSpeed}
               onToggleMute={toggleMute}

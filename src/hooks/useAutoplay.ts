@@ -11,6 +11,7 @@ type UseAutoplayProps = {
   // biome-ignore lint/suspicious/noExplicitAny: query data
   currentItemDetails: any;
   onLoadNewVideo: (url: string, itemId: string) => void;
+  onEndOfFile?: () => Promise<void>;
   playbackState: {
     currentTime: () => string;
     duration: () => number;
@@ -131,6 +132,14 @@ export function useAutoplay(props: UseAutoplayProps) {
           commands.playbackPause();
           setShowAutoplay(true);
         }
+
+        if (
+          progress >= 95 &&
+          props.currentItemDetails?.data?.Type === "Episode" &&
+          !isCancelled()
+        ) {
+          playNextEpisode();
+        }
       }
     }
   };
@@ -185,7 +194,8 @@ export function useAutoplay(props: UseAutoplayProps) {
       playbackTimeUnlisten = await listen("playback-time", (event) => {
         handlePlaybackTime(event.payload as string);
       });
-      endOfFileUnlisten = await listen("end-of-file", (event) => {
+      endOfFileUnlisten = await listen("end-of-file", async (event) => {
+        await props.onEndOfFile?.();
         handleEndOfFile(event.payload as number);
       });
     }

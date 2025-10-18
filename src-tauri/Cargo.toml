@@ -51,5 +51,8 @@ argon2 = "0.5"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 
+
+objc2-app-kit = "0.3.2"
+
 [profile.dev.package.scrypt]
 opt-level = 3

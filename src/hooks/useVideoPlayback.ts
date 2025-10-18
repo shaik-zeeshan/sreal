@@ -1,9 +1,11 @@
 import { PlayMethod } from "@jellyfin/sdk/lib/generated-client";
 import { getPlaystateApi } from "@jellyfin/sdk/lib/utils/api/playstate-api";
+import { useQueryClient } from "@tanstack/solid-query";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, onCleanup } from "solid-js";
 import { createStore } from "solid-js/store";
+import { useGeneralInfo } from "~/components/current-user-provider";
 import { useJellyfin } from "~/components/jellyfin-provider";
 import type {
   BufferHealth,
@@ -18,7 +20,7 @@ import {
   DEFAULT_AUDIO_LANG,
   DEFAULT_SUBTITLE_LANG,
 } from "~/components/video/types";
-import type library from "~/lib/jellyfin/library";
+import library from "~/lib/jellyfin/library";
 import { commands } from "~/lib/tauri";
 
 type ItemDetails =
@@ -30,7 +32,8 @@ export function useVideoPlayback(
   itemDetails: () => ItemDetails
 ) {
   const jf = useJellyfin();
-
+  const queryClient = useQueryClient();
+  const { store: userStore } = useGeneralInfo();
   const [state, setState] = createStore({
     audioIndex: -1,
     subtitleIndex: -1,
@@ -238,6 +241,15 @@ export function useVideoPlayback(
     }, 1000);
   };
 
+  const handleOpenPip = async () => {
+    try {
+      await commands.openPipWindow();
+      showOSD("play", null, "Picture in Picture opened");
+    } catch (error) {
+      showOSD("play", null, "Picture in Picture failed to open");
+    }
+  };
+
   const loadNewVideo = (url: string, newItemId: string) => {
     setState("url", url);
     setState("currentItemId", newItemId);
@@ -310,6 +322,11 @@ export function useVideoPlayback(
     setState("chapters", chapters);
   });
 
+  createEffect(() => {
+    // console.log("userProgress", userProgress);
+    // setState("currentTime", userProgress.toString());
+  });
+
   createEffect(async () => {
     const currentItemId = itemId();
     // Clean up existing listeners when itemId changes
@@ -318,11 +335,53 @@ export function useVideoPlayback(
     });
     unlistenFuncs = [];
 
-    const fileLoaded = await listen("file-loaded", (_event) => {
+    const fileLoaded = await listen("file-loaded", async (event) => {
       // Reset loading state when file is loaded
       setState("isLoading", false);
       setState("isBuffering", false);
       commands.playbackPlay();
+
+      const [currentTime, duration] = event.payload as [number, number];
+
+      if (Number(state.currentTime) > 0) {
+        commands.playbackSeek(Number(state.currentTime));
+      } else {
+        const userProgress = itemDetails()?.UserData?.PlaybackPositionTicks
+          ? (itemDetails()?.UserData?.PlaybackPositionTicks as number) /
+            10_000_000
+          : 0;
+
+        if (userProgress > 0 && userProgress !== Number(currentTime)) {
+          commands.playbackSeek(userProgress);
+        }
+      }
+
+      try {
+        if (!jf.api) {
+          return;
+        }
+        const playstateApi = getPlaystateApi(jf.api);
+        await playstateApi.reportPlaybackStart({
+          playbackStartInfo: {
+            ItemId: currentItemId,
+            PlaySessionId: playSessionId,
+            CanSeek: true,
+            IsPaused: false,
+            IsMuted: state.isMuted,
+            VolumeLevel: Math.min(state.volume, 100), // Clamp to 100 for Jellyfin
+            PlayMethod: PlayMethod.DirectStream,
+            AudioStreamIndex:
+              state.audioIndex >= 0 ? state.audioIndex : undefined,
+            SubtitleStreamIndex:
+              state.subtitleIndex > 0 ? state.subtitleIndex : undefined,
+          },
+        });
+
+        // Initialize last progress report time
+        lastProgressReportTime = Date.now();
+      } catch (_error) {
+        // Do nothing
+      }
     });
 
     unlistenFuncs.push(fileLoaded);
@@ -413,48 +472,8 @@ export function useVideoPlayback(
 
     unlistenFuncs.push(subtitleList);
 
-    const duration = await listen("duration", async (event) => {
+    const duration = await listen("duration", (event) => {
       setState("duration", Number(event.payload as string));
-
-      // Resume from saved position if available
-      const savedPosition = itemDetails()?.UserData?.PlaybackPositionTicks ?? 0;
-      if (savedPosition && savedPosition > 0) {
-        // Convert ticks to seconds (1 tick = 0.0000001 seconds)
-        const savedSeconds = savedPosition / 10_000_000;
-        // Only resume if not near the end (more than 5% remaining)
-        const eventDuration = Number(event.payload as string);
-        if (savedSeconds < eventDuration * 0.95) {
-          commands.playbackSeek(savedSeconds);
-          setState("currentTime", savedSeconds.toString());
-        }
-      }
-
-      try {
-        if (!jf.api) {
-          return;
-        }
-        const playstateApi = getPlaystateApi(jf.api);
-        await playstateApi.reportPlaybackStart({
-          playbackStartInfo: {
-            ItemId: currentItemId,
-            PlaySessionId: playSessionId,
-            CanSeek: true,
-            IsPaused: false,
-            IsMuted: state.isMuted,
-            VolumeLevel: Math.min(state.volume, 100), // Clamp to 100 for Jellyfin
-            PlayMethod: PlayMethod.DirectStream,
-            AudioStreamIndex:
-              state.audioIndex >= 0 ? state.audioIndex : undefined,
-            SubtitleStreamIndex:
-              state.subtitleIndex > 0 ? state.subtitleIndex : undefined,
-          },
-        });
-
-        // Initialize last progress report time
-        lastProgressReportTime = Date.now();
-      } catch (_error) {
-        // Do nothing
-      }
     });
 
     unlistenFuncs.push(duration);
@@ -573,6 +592,29 @@ export function useVideoPlayback(
     commands.playbackClear();
   });
 
+  const onEndOfFile = async () => {
+    const queryKey = [
+      library.query.getItem.key,
+      library.query.getItem.keyFor(itemId(), userStore?.user?.Id),
+    ];
+    await queryClient.invalidateQueries({
+      queryKey,
+    });
+
+    if (!jf.api) {
+      return;
+    }
+
+    const playstateApi = getPlaystateApi(jf.api);
+    await playstateApi.reportPlaybackStopped({
+      playbackStopInfo: {
+        ItemId: itemId(),
+        PlaySessionId: playSessionId,
+        PositionTicks: Math.floor(Number(state.currentTime) * 10_000_000),
+      },
+    });
+  };
+
   return {
     state,
     setState,
@@ -585,6 +627,7 @@ export function useVideoPlayback(
     handleVolumeChange,
     setSpeed,
     handleProgressClick,
+    handleOpenPip,
     loadNewVideo,
     handleControlMouseEnter,
     handleControlMouseLeave,
@@ -596,5 +639,6 @@ export function useVideoPlayback(
     updateLoadingStage,
     updateNetworkQuality,
     updateBufferHealth,
+    onEndOfFile,
   };
 }
