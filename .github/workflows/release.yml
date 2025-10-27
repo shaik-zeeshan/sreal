@@ -109,7 +109,7 @@ jobs:
           fi
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ steps.app-info.outputs.app_name }}-macos-dmg
           path: src-tauri/target/release/bundle/dmg/${{ steps.app-info.outputs.app_name }}_${{ steps.app-info.outputs.version }}_macos-aarch64.dmg
