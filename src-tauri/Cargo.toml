@@ -49,7 +49,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-stronghold = "2"
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
 argon2 = "0.5"
-rand = "0.8"
+rand = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 
 
