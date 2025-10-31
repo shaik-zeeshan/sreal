@@ -55,7 +55,7 @@
     "conventional-commits-parser": "^6.2.0",
     "husky": "^9.1.7",
     "tailwindcss": "^4.1.16",
-    "ultracite": "6.0.3",
+    "ultracite": "6.1.0",
     "unplugin-icons": "^22.5.0"
   },
   "engines": {
