@@ -43,7 +43,7 @@
     "vinxi": "^0.5.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.3.0",
+    "@biomejs/biome": "2.3.2",
     "@effect/language-service": "^0.48.0",
     "@iconify-icon/solid": "^3.0.2",
     "@iconify/json": "^2.2.400",
